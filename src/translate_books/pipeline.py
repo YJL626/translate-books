@@ -27,7 +27,7 @@ class Settings:
     chunk_chars: int = 1200
     summary_chunk_chars: int = 2500
     summary_chars: int = 1000
-    workers: int = 2
+    workers: int = 4
 
 
 @dataclass

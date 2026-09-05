@@ -1,12 +1,12 @@
 # translate-books
 
-使用本机 Ollama 翻译 EPUB，默认模型为 `hf.co/tencent/Hy-MT2-7B-GGUF:Q8_0`，默认译为简体中文，正文默认双并发。
+使用本机 Ollama 或自定义 OpenAI 兼容接口翻译 EPUB。默认模型为 `hf.co/tencent/Hy-MT2-7B-GGUF:Q8_0`，译为简体中文；Ollama 默认 4 并发，兼容接口默认 2 并发。
 
 按 EPUB spine 阅读顺序提取正文，先对全书分块概括、归并章节摘要，再归并全书摘要与术语。**所有摘要完成后才开始翻译**。每段译文都参考全书摘要和对应章节摘要，摘要另存 Markdown。
 
 ## 使用
 
-需要安装 mise 和 Ollama。克隆项目后，通过 mise 安装 Python、uv 和依赖：
+需要安装 mise；本机模式还需要 Ollama，兼容接口模式不需要。克隆项目后，通过 mise 安装 Python、uv 和依赖：
 
 ```bash
 git clone https://github.com/YJL626/translate-books.git
@@ -23,8 +23,8 @@ ollama pull hf.co/tencent/Hy-MT2-7B-GGUF:Q8_0
 mise run translate -- "book.epub"
 mise run translate -- "book.epub" -o "译本.epub"
 
-# 默认两个段落同时翻译，也可显式指定
-mise run translate -- "book.epub" --workers 2
+# Ollama 默认四个段落同时翻译，也可显式指定
+mise run translate -- "book.epub" --workers 4
 # 如需串行
 mise run translate -- "book.epub" --workers 1
 ```
@@ -58,7 +58,33 @@ mise run translate -- "book.epub" --model "translategemma:12b" --summary-model "
 translate-books "book.epub" --model "你的模型名称" --summary-model "你的摘要模型名称"
 ```
 
-模型名称必须与 `ollama list` 一致；模型缺失时会报错，不会自动下载或替换模型。目前提供 Ollama 接口，不支持直接传入 GGUF 文件或任意 OpenAI 兼容接口。
+Ollama 模式下模型名称必须与 `ollama list` 一致；模型缺失时会报错，不会自动下载或替换模型。不支持直接传入 GGUF 文件。
+
+## OpenAI 兼容接口
+
+显式指定 `--backend openai`、接口地址及模型名，不会自动切换云端。
+
+```bash
+export OPENAI_BASE_URL="https://your-server.example/v1"
+export OPENAI_API_KEY="你的 API Key"
+translate-books "book.epub" --backend openai --model "模型名称"
+
+# 命令行地址优先于环境变量；摘要可使用不同模型
+translate-books "book.epub" --backend openai \
+  --base-url "https://your-server.example/v1" \
+  --model "翻译模型" --summary-model "摘要模型"
+
+# 本地无鉴权兼容接口（清除已有密钥）
+env -u OPENAI_API_KEY translate-books "book.epub" --backend openai \
+  --base-url "http://localhost:11434/v1" \
+  --model "hf.co/tencent/Hy-MT2-7B-GGUF:Q8_0"
+```
+
+使用 Bearer 鉴权；密钥默认读取 `OPENAI_API_KEY`，也可用 `--api-key-env MY_API_KEY` 指定其他环境变量名。不自动加载 `.env`，不把密钥作为命令行参数或写入缓存配置。请勿提交真实密钥或书籍内容。
+
+接口遵循 [Chat Completions 格式](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)。地址只包含主机时自动补 `/v1`；也接受完整 `/v1/chat/completions` 地址和自定义路径前缀。不依赖 `GET /models`，模型名由服务端验证。摘要和翻译共用地址和鉴权。
+
+默认发送 `max_tokens`；服务要求新字段时添加 `--openai-token-limit max_completion_tokens`。`--num-ctx` 仅用于客户端分块和预算校验，不会修改远程模型窗口，应按所选模型设置。输出截断、拒绝或非文本结果不会作为成功译文缓存。限流时可用 `--workers 1`；429 和服务端临时错误会重试。缓存按接口地址、模型、提示词和参数隔离。
 
 ## 其他用法
 
@@ -105,13 +131,13 @@ mise run translate -- "book.epub" --host http://localhost:11434 --num-ctx 16384
 
 预计剩余时间根据最近 50 个实际调用模型的段落耗时、文本长度和并发数计算，包含尚未翻译的正文和阅读器目录。前 3 个新段落完成前显示“估算中”；缓存命中会增加完成进度，但不会用于估算模型速度。重启后“本次已用”重新计时。摘要阶段只显示当前时间和已用时间；`--quiet` 隐藏这些进度日志。
 
-正文及阅读器目录默认以 2 并发翻译，使用 `--workers 1` 可改为串行，摘要仍按依赖顺序生成。程序只保留最多指定数量的在途任务；各任务翻译独立副本，再按原位置写回，完成先后不会改变章节和段落顺序。SQLite 缓存支持线程安全写入，切换并发数不会使已有缓存失效。
+正文及阅读器目录在 Ollama 模式下默认 4 并发，兼容接口默认 2 并发；`--workers` 可覆盖默认值，`--workers 1` 为串行，摘要仍按依赖顺序生成。程序只保留最多指定数量的在途任务；各任务翻译独立副本，再按原位置写回，完成先后不会改变章节和段落顺序。SQLite 缓存支持线程安全写入，切换并发数不会使已有缓存失效。
 
-Ollama 服务端也需要允许相应的并行请求，例如启动服务时设置 `OLLAMA_NUM_PARALLEL=2`。仅给已经启动的客户端设置该环境变量无效；具体设置及显存要求见 [Ollama 并发说明](https://docs.ollama.com/faq#how-does-ollama-handle-concurrent-requests)。进度中的并发数表示 CLI 任务数，实际模型吞吐量取决于服务端配置与可用显存。
+Ollama 服务端也需要允许相应的并行请求，例如启动服务时设置 `OLLAMA_NUM_PARALLEL=4`。仅给已经启动的客户端设置该环境变量无效；具体设置及显存要求见 [Ollama 并发说明](https://docs.ollama.com/faq#how-does-ollama-handle-concurrent-requests)。进度中的并发数表示 CLI 任务数，实际模型吞吐量取决于服务端配置与可用显存。
 
 适用于可提取文本、XHTML 合法的 EPUB 2/3。图片里的文字不会 OCR 或翻译；代码、公式、SVG、`translate="no"` 内容保留。图像替代文本及其他属性、OPF 书名和作者等元数据保留，语言字段更新。内嵌字体若缺少中文字形，阅读器需要提供中文回退字体；固定版式在译文变长后仍可能需要人工检查。暂不支持正文 DRM、数字签名、多 rendition 或不合法 XHTML。
 
-摘要和术语由模型生成，复杂专名仍建议人工核对。默认摘要和翻译都使用你指定的模型；`--summary-model` 可以选用已安装的其他本地模型。全部书籍内容发送到所配置的 Ollama 服务，默认仅 `localhost`，没有云端翻译接口。
+摘要和术语由模型生成，复杂专名仍建议人工核对。`--summary-model` 可以指定不同摘要模型。书籍内容会发送到所配置的服务：默认 Ollama 仅 `localhost`；选择远程兼容接口时，正文及摘要上下文会发送到该服务，请确认其隐私政策和费用。
 
 提示词结合了 [Hy-MT2 官方的上下文与结构化翻译方式](https://huggingface.co/tencent/Hy-MT2-7B-GGUF)，调用 [Ollama Generate API](https://docs.ollama.com/api/generate)。
 

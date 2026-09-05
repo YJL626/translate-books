@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .epub import Epub
-from .model import DEFAULT_MODEL, Cache, Ollama, TranslationError
+from .model import DEFAULT_MODEL, Cache, Ollama, OpenAICompatible, TranslationError
 from .pipeline import Pipeline, Settings
 
 LANGUAGES = {
@@ -33,7 +33,7 @@ LANGUAGES = {
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="translate-books",
-        description="使用本机 Ollama：先概括全书，再结合全书和章节上下文翻译 EPUB。",
+        description="使用 Ollama 或 OpenAI 兼容接口：先概括全书，再结合上下文翻译 EPUB。",
     )
     result.add_argument("input", type=Path, help="输入 EPUB 路径")
     result.add_argument("-o", "--output", type=Path, help="输出路径；默认 原名.zh-Hans.epub")
@@ -41,8 +41,21 @@ def parser() -> argparse.ArgumentParser:
         "-t", "--target", default="zh-Hans", help="目标语言，默认 zh-Hans（简体中文）"
     )
     result.add_argument("--lang-code", help="自定义目标语言的 BCP 47 代码，如 pt-BR")
-    result.add_argument("--model", default=DEFAULT_MODEL, help=f"翻译模型，默认 {DEFAULT_MODEL}")
+    result.add_argument("--model", help=f"翻译模型；Ollama 默认 {DEFAULT_MODEL}，兼容接口需指定")
     result.add_argument("--summary-model", help="摘要模型；默认与翻译模型相同")
+    result.add_argument(
+        "--backend", choices=["ollama", "openai"], default="ollama", help="接口类型，默认 ollama"
+    )
+    result.add_argument("--base-url", help="OpenAI 兼容接口地址，也可设置 OPENAI_BASE_URL")
+    result.add_argument(
+        "--api-key-env", default="OPENAI_API_KEY", help="API Key 的环境变量名，默认 OPENAI_API_KEY"
+    )
+    result.add_argument(
+        "--openai-token-limit",
+        choices=["max_tokens", "max_completion_tokens"],
+        default="max_tokens",
+        help="兼容接口的输出 token 参数名，默认 max_tokens",
+    )
     result.add_argument(
         "--host",
         default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
@@ -59,7 +72,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timeout", type=float, default=300, help="单次请求超时秒数，默认 300")
     result.add_argument("--retries", type=int, default=2, help="网络或服务端错误重试次数，默认 2")
     result.add_argument(
-        "--workers", type=int, default=2, help="同时翻译的段落数，默认 2；设为 1 串行"
+        "--workers", type=int, help="同时翻译的段落数；Ollama 默认 4，兼容接口默认 2；设为 1 串行"
     )
     result.add_argument("--cache", type=Path, help="SQLite 缓存路径，默认与输出同目录")
     result.add_argument("--summary-output", type=Path, help="摘要 Markdown 路径，默认与输出同名")
@@ -71,6 +84,23 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.workers is None:
+        args.workers = 4 if args.backend == "ollama" else 2
+    model_name = args.model or DEFAULT_MODEL
+    base_url = None
+    api_key = None
+    if args.backend == "openai":
+        base_url = args.base_url or os.environ.get("OPENAI_BASE_URL")
+        if not base_url or not args.model:
+            raise TranslationError(
+                "使用兼容接口请指定 --model，并设置 --base-url 或 OPENAI_BASE_URL。"
+            )
+        base_url = OpenAICompatible.normalize_url(base_url)
+        api_key = os.environ.get(args.api_key_env)
+        if args.api_key_env != "OPENAI_API_KEY" and not api_key:
+            raise TranslationError(f"未设置 API Key 环境变量：{args.api_key_env}")
+    elif args.base_url:
+        raise TranslationError("--base-url 需要同时指定 --backend openai；Ollama 地址使用 --host。")
     if args.num_ctx < 8192:
         raise TranslationError("--num-ctx 至少为 8192。")
     if args.chunk_chars < 64 or args.summary_chunk_chars < 256 or args.summary_chars < 128:
@@ -108,8 +138,8 @@ def run(args: argparse.Namespace) -> None:
                 print(f"{chapter.path}\t{len(chapter.text):,} 字符")
             return
         settings = Settings(
-            model=args.model,
-            summary_model=args.summary_model or args.model,
+            model=model_name,
+            summary_model=args.summary_model or model_name,
             target=target,
             language=code,
             chunk_chars=args.chunk_chars,
@@ -118,9 +148,17 @@ def run(args: argparse.Namespace) -> None:
             workers=args.workers,
         )
         cache = Cache(cache_path)
-        model = Ollama(
-            args.host, cache, num_ctx=args.num_ctx, timeout=args.timeout, retries=args.retries
-        )
+        options = dict(num_ctx=args.num_ctx, timeout=args.timeout, retries=args.retries)
+        if args.backend == "openai":
+            model = OpenAICompatible(
+                base_url,
+                cache,
+                api_key=api_key,
+                token_limit_field=args.openai_token_limit,
+                **options,
+            )
+        else:
+            model = Ollama(args.host, cache, **options)
         try:
             required = [settings.summary_model]
             if not args.summary_only:

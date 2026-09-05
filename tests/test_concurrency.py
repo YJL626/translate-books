@@ -15,17 +15,29 @@ from translate_books.pipeline import BookContext, Pipeline, Settings
 from translate_books.progress import Progress
 
 
-def test_default_workers_is_two():
-    assert cli.parser().parse_args(["book.epub"]).workers == 2
-    assert Settings().workers == 2
+@pytest.mark.parametrize(
+    "backend,explicit,expected",
+    [("ollama", None, 4), ("openai", None, 2), ("ollama", 2, 2), ("openai", 4, 4)],
+)
+def test_backend_default_workers(epub_path, backend, explicit, expected):
+    argv = [str(epub_path), "--backend", backend, "--dry-run"]
+    if backend == "openai":
+        argv += ["--base-url", "https://example.com/v1", "--model", "model"]
+    if explicit is not None:
+        argv += ["--workers", str(explicit)]
+    args = cli.parser().parse_args(argv)
+    cli.run(args)
+    assert args.workers == expected
+    assert Settings().workers == 4
 
 
-def test_two_workers_overlap_and_preserve_document_order(epub_path):
+@pytest.mark.parametrize("workers", [2, 4])
+def test_workers_overlap_and_preserve_document_order(epub_path, workers):
     class ConcurrentModel(FakeModel):
         def __init__(self):
             super().__init__()
             self.lock = threading.Lock()
-            self.barrier = threading.Barrier(2)
+            self.barrier = threading.Barrier(workers)
             self.active = self.peak = self.started = 0
 
         def generate(self, *args, **kwargs):
@@ -35,7 +47,7 @@ def test_two_workers_overlap_and_preserve_document_order(epub_path):
                 index = self.started
                 self.peak = max(self.peak, self.active)
             try:
-                if index <= 2:
+                if index <= workers:
                     self.barrier.wait(timeout=5)
                 return super().generate(*args, **kwargs)
             finally:
@@ -50,17 +62,17 @@ def test_two_workers_overlap_and_preserve_document_order(epub_path):
         for document in book.documents
     ]
     try:
-        Pipeline(model, Settings(workers=2), messages.append).translate(
+        Pipeline(model, Settings(workers=workers), messages.append).translate(
             book, BookContext("全书摘要", {})
         )
-        assert model.peak == 2
+        assert model.peak == workers
         assert [
             [(node.tag, dict(node.attrib)) for node in document.tree.getroot().iter()]
             for document in book.documents
         ] == before
         assert book.chapters[0].tree.find(".//{*}h1").text == "译文"
         assert book.chapters[1].tree.find(".//{*}h1").text == "译文"
-        assert "并发 2" in messages[-1]
+        assert f"并发 {workers}" in messages[-1]
         assert "100.0%" in messages[-1]
     finally:
         book.close()
