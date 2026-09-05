@@ -1,0 +1,23 @@
+[tools]
+python = "3.12.14"
+uv = "0.12.5"
+
+[tasks.install]
+description = "安装项目依赖"
+run = "uv sync --locked"
+
+[tasks.translate]
+description = "翻译 EPUB（参数直接追加在任务名后）"
+run = "uv run translate-books"
+
+[tasks.test]
+description = "运行测试"
+run = "uv run pytest"
+
+[tasks.lint]
+description = "检查 Python 代码与格式"
+run = ["uv run ruff check .", "uv run ruff format --check ."]
+
+[tasks.format]
+description = "格式化 Python 代码"
+run = "uv run ruff format ."
